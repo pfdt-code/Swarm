@@ -3,7 +3,7 @@ import threading
 import math
 import socket, json, time
 class Telemetry:
-    def __init__(self, connection, drone_id, broadcast_ip, port):
+    def __init__(self, connection, drone_id, broadcast_ip, port,bind_ip = "0.0.0.0"):
         self.connection = connection
         self.master = connection.master
         self.running = False
@@ -11,6 +11,7 @@ class Telemetry:
         self.drone_id = drone_id
         self.broadcast_ip = broadcast_ip
         self.port = port
+        self.bind_ip = bind_ip
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
@@ -108,7 +109,7 @@ class Telemetry:
     def listen_thread(self, on_message=None):
         listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
-        listen_sock.bind((self.broadcast_ip, self.port))
+        listen_sock.bind((self.bind_ip, self.port))
         while self.running:
             try:
                 data, addr = listen_sock.recvfrom(4096)

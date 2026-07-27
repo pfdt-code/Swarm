@@ -1,4 +1,6 @@
 import threading
+from logging import CRITICAL
+
 from pymavlink import mavutil
 import math
 import time
@@ -6,10 +8,12 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
+    CRITICAL_DISTANCE = 3.0
+    SLOWDOWN_ZONE = 8.0
     def __init__(self):
         self.connection = Connection("udp:127.0.0.1:14550")
         self.master = self.connection.master
-        self.telemetry = Telemetry(self.connection, "drone1", '0.0.0.0',5005)
+        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255",5005,'0.0.0.0')
         self.telemetry.start()
         self.lat = None
         self.lon = None
@@ -105,12 +109,20 @@ class Drone:
 
     def wait_for_goto_position(self,target_lat, target_lon, altitude, timeout=120):
         start_time = time.time()
+        was_braking = False
         while time.time() - start_time < timeout:
 
 
             cur_lat = self.telemetry.telemetry_data["position"]["lat"]
             cur_lon = self.telemetry.telemetry_data["position"]["lon"]
             cur_alt = self.telemetry.telemetry_data["position"]["alt"]
+            if not self.check_separation(cur_lat, cur_lon):
+                was_braking = True
+                time.sleep(0.5)
+                continue
+            if was_braking:
+                self.set_mode("GUIDED")
+                was_braking = False
 
             dist = self.calc_distance(cur_lat, cur_lon, target_lat, target_lon)
             print(f"POS → LAT {cur_lat:.7f} | LON {cur_lon:.7f} | ALT {cur_alt:.2f} | DIST {dist:.1f} m")
@@ -140,6 +152,31 @@ class Drone:
             time.sleep(0.5)
         print("Timeout waiting for altitude")
         return False
+    def handle_peer_message(self, msg, addr):
+        with self.other_lock:
+            self.other_drones[msg["drone_id"]] = {
+                "lat": msg["position"]["lat"],
+                "lon": msg["position"]["lon"],
+                "alt": msg["position"]["alt"],
+                "timestamp": msg["timestamp"],
+            }
+    def get_nearby_drones(self, max_age=2.0):
+        with self.other_lock:
+            now = time.time()
+            return {
+                k: v for k, v in self.other_drones.items()
+                if now - v["timestamp"] < max_age
+            }
+    def check_separation(self, my_lat, my_lon):
+        for drone_id, pos in self.get_nearby_drones().items():
+            dlat = (my_lat - pos["lat"]) * 111320
+            dlon =  (my_lon - pos["lon"]) * 111320 * math.cos(math.radians(my_lat))
+            dist = math.hypot(dlon, dlat)
+            if dist < Drone.CRITICAL_DISTANCE:
+                print(f"[Emergency]{drone_id} is {dist:.2f} m away")
+                self.set_mode("BRAKE")
+                return False
+        return True
 def start():
     start_mission = Drone()
     while True:
@@ -169,7 +206,7 @@ def start():
     print("Motors armed")
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
-    start_mission.wait_for_goto_position(28.309369, 77.354522, 20)
+    start_mission.wait_for_goto_position(28.315913, 77.359462, 20)
 
 if __name__ == '__main__':
     start()
