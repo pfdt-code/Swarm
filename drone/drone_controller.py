@@ -13,16 +13,18 @@ class Drone:
     def __init__(self):
         self.connection = Connection("udp:127.0.0.1:14550")
         self.master = self.connection.master
-        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255",5005,'0.0.0.0')
-        self.telemetry.start()
+        self.other_drones = {}
+        self.other_lock = threading.Lock()
+
+        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
         self.altitude = None
         self.mode = None
         self.armed = False
-        self.other_drones = {}
         self.position_lock = threading.Lock()
-        self.other_lock = threading.Lock()
+
 
     def is_ready_to_arm(self):
 
