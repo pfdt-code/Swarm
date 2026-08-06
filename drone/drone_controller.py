@@ -1,5 +1,5 @@
 import threading
-from logging import CRITICAL
+
 import logging
 from pymavlink import mavutil
 import math
