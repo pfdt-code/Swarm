@@ -1,6 +1,6 @@
 import threading
 from logging import CRITICAL
-
+import logging
 from pymavlink import mavutil
 import math
 import time
@@ -8,10 +8,10 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
-    CRITICAL_DISTANCE = 3.0
-    SLOWDOWN_ZONE = 8.0
+    CRITICAL_DISTANCE = 50.0
+    SLOWDOWN_ZONE = 100.0
     def __init__(self):
-        self.connection = Connection("udp:127.0.0.1:14550")
+        self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
         self.other_drones = {}
         self.other_lock = threading.Lock()
@@ -24,7 +24,12 @@ class Drone:
         self.mode = None
         self.armed = False
         self.position_lock = threading.Lock()
-
+        logging.basicConfig(
+           filename='drone_events.log',
+           level=logging.INFO,
+           format='%(asctime)s [%(levelname)s] %(message)s',
+           datefmt='%Y-%m-%d %H:%M:%S'
+            )
 
     def is_ready_to_arm(self):
 
@@ -123,6 +128,7 @@ class Drone:
                 time.sleep(0.5)
                 continue
             if was_braking:
+                logging.info(f"RESUME | switching back to GUIDED | pos=({cur_lat:.7f},{cur_lon:.7f})")
                 self.set_mode("GUIDED")
                 was_braking = False
 
@@ -155,6 +161,9 @@ class Drone:
         print("Timeout waiting for altitude")
         return False
     def handle_peer_message(self, msg, addr):
+        pos = msg.get("position",{})
+        if pos.get("lat") is None or pos.get("lon") is None:
+          return
         with self.other_lock:
             self.other_drones[msg["drone_id"]] = {
                 "lat": msg["position"]["lat"],
@@ -171,11 +180,19 @@ class Drone:
             }
     def check_separation(self, my_lat, my_lon):
         for drone_id, pos in self.get_nearby_drones().items():
+            if pos["lat"] is None or pos["lon"] is None:
+                continue
             dlat = (my_lat - pos["lat"]) * 111320
             dlon =  (my_lon - pos["lon"]) * 111320 * math.cos(math.radians(my_lat))
             dist = math.hypot(dlon, dlat)
+            print(f"[SEPARATION CHECK] distance to {drone_id}: {dist:.2f} m")
+            if dist < Drone.SLOWDOWN_ZONE:
+                logging.info(f"SLOWDOWN_ZONE | near={drone_id} | dist={dist:.2f}m | "
+                f"my_pos=({my_lat:.7f},{my_lon:.7f})")
             if dist < Drone.CRITICAL_DISTANCE:
                 print(f"[Emergency]{drone_id} is {dist:.2f} m away")
+                logging.warning(f"BREAK | near={drone_id} | dist={dist:.2f}m | "
+                                f"my_pos={my_lat:.7f}, {my_lon:.7f} | peer_pos({pos['lat']:.7f},{pos['lon']:.7f})")
                 self.set_mode("BRAKE")
                 return False
         return True
@@ -209,6 +226,7 @@ def start():
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
     start_mission.wait_for_goto_position(28.315913, 77.359462, 20)
-
+    start_mission.set_mode("LAND")
+    time.sleep(100)
 if __name__ == '__main__':
     start()

@@ -99,6 +99,9 @@ class Telemetry:
     def broadcast_thread(self, interval=0.5):
         while self.running:
             snapshot = self.get_snapshot()
+            if snapshot["position"]["lat"] is None:
+                time.sleep(interval)
+                continue	
             try:
                 packet = json.dumps(snapshot).encode()
                 self.sock.sendto(packet, (self.broadcast_ip, self.port))
