@@ -8,8 +8,8 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
-    CRITICAL_DISTANCE = 50.0
-    SLOWDOWN_ZONE = 100.0
+    CRITICAL_DISTANCE = 2.0
+    SLOWDOWN_ZONE = 5.0
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -114,7 +114,7 @@ class Drone:
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
         return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    def wait_for_goto_position(self,target_lat, target_lon, altitude, timeout=120):
+    def wait_for_goto_position(self,target_lat, target_lon, altitude, timeout=1200):
         start_time = time.time()
         was_braking = False
         while time.time() - start_time < timeout:
