@@ -16,7 +16,7 @@ class Drone:
         self.other_drones = {}
         self.other_lock = threading.Lock()
 
-        self.telemetry = Telemetry(self.connection, "drone1", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -196,6 +196,7 @@ class Drone:
                               (my_dist_to_target == peer_dist_to_target and self.telemetry.drone_id > drone_id))
                 if not am_farther:
                     print(f"[PRIORITY] {drone_id} | dist={dist:.2f} m, but I'm closer to target -- holding course")
+                    continue
                 print(f"[Emergency]{drone_id} is {dist:.2f} m away")
                 logging.warning(f"BREAK | near={drone_id} | dist={dist:.2f}m | "
                                 f"my_pos={my_lat:.7f}, {my_lon:.7f} | peer_pos({pos['lat']:.7f},{pos['lon']:.7f})")
@@ -256,7 +257,7 @@ def start():
     my_index = nearby_ids.index(start_mission.telemetry.drone_id)
     total = len(nearby_ids)
 
-    d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=3.0)
+    d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=5.0)
     slot_lat, slot_lon = start_mission.offset_latlon(SHARED_LAT, SHARED_LON, d_north, d_east)
 
     print(f"Flying to individual slot {my_index}/{total}: offset north={d_north:.1f} east={d_east:.1f}")
