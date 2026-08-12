@@ -123,7 +123,7 @@ class Drone:
             cur_lat = self.telemetry.telemetry_data["position"]["lat"]
             cur_lon = self.telemetry.telemetry_data["position"]["lon"]
             cur_alt = self.telemetry.telemetry_data["position"]["alt"]
-            if not self.check_separation(cur_lat, cur_lon):
+            if not self.check_separation(cur_lat, cur_lon, target_lat, target_lon):
                 was_braking = True
                 time.sleep(0.5)
                 continue
@@ -178,7 +178,8 @@ class Drone:
                 k: v for k, v in self.other_drones.items()
                 if now - v["timestamp"] < max_age
             }
-    def check_separation(self, my_lat, my_lon):
+    def check_separation(self, my_lat, my_lon, target_lat, target_lon):
+        my_dist_to_target = self.calc_distance(my_lat, my_lon, target_lat, target_lon)
         for drone_id, pos in self.get_nearby_drones().items():
             if pos["lat"] is None or pos["lon"] is None:
                 continue
@@ -190,6 +191,11 @@ class Drone:
                 logging.info(f"SLOWDOWN_ZONE | near={drone_id} | dist={dist:.2f}m | "
                 f"my_pos=({my_lat:.7f},{my_lon:.7f})")
             if dist < Drone.CRITICAL_DISTANCE:
+                peer_dist_to_target = self.calc.distance(pos["lat"], pos["lon"], target_lat, target_lon)
+                am_farther = ((my_dist_to_target > peer_dist_to_target) or
+                              (my_dist_to_target == peer_dist_to_target and self.telemetry.drone_id > drone_id))
+                if not am_farther:
+                    print(f"[PRIORITY] {drone_id} | dist={dist:.2f} m, but I'm closer to target -- holding course")
                 print(f"[Emergency]{drone_id} is {dist:.2f} m away")
                 logging.warning(f"BREAK | near={drone_id} | dist={dist:.2f}m | "
                                 f"my_pos={my_lat:.7f}, {my_lon:.7f} | peer_pos({pos['lat']:.7f},{pos['lon']:.7f})")
