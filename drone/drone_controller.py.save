@@ -146,7 +146,7 @@ class Drone:
         print("Timeout reaching destination")
         return False
 
-    def wait_for_altitude(self, target_altitude, tolerance=1.0, timeout=60):
+    def wait_for_altitude(self, target_altitude, tolerance=1.0, timeout=30):
         start = time.time()
         while time.time() - start < timeout:
             msg = self.telemetry.telemetry_data["position"]["alt"]
@@ -203,19 +203,18 @@ class Drone:
                 return False
         return True
     def compute_landing_offset(self, index, total, spacing=3.0):
-       """Evenly place drones on a small circle around the shared target."""
-       if total <= 1:
-          return 0.0, 0.0
-       radius = spacing / (2 * math.sin(math.pi / total))
-       angle = 2 * math.pi * index / total
-       d_north = radius * math.cos(angle)
-       d_east = radius * math.sin(angle)
-       return d_north, d_east
+        """Evenly place drones on a small circle around the shared target."""
+        if total <= 1:
+            return 0.0, 0.           radius = spacing / (2 * math.sin(math.pi / total))
+            angle = 2 * math.pi * index / total
+            d_north = radius * math.cos(angle)
+            d_east = radius * math.sin(angle)
+            return d_north, d_east
 
-    def offset_latlon(self, lat, lon, d_north, d_east):
-       new_lat = lat + (d_north / 111320)
-       new_lon = lon + (d_east / (111320 * math.cos(math.radians(lat))))
-       return new_lat, new_lon
+        def offset_latlon(self, lat, lon, d_north, d_east):
+            new_lat = lat + (d_north / 111320)
+            new_lon = lon + (d_east / (111320 * math.cos(math.radians(lat))))
+            return new_lat, new_lon
 def start():
     start_mission = Drone()
     while True:
@@ -263,6 +262,5 @@ def start():
     start_mission.wait_for_goto_position(slot_lat, slot_lon, 20)   # separated by ~3m minimum, not 0m
 
     start_mission.set_mode("LAND")
-    time.sleep(100)
 if __name__ == '__main__':
     start()
