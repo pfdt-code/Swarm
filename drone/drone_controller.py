@@ -18,7 +18,7 @@ class Drone:
         self.other_lock = threading.Lock()
         self.arrived_drones = {}
         self.arrived_lock = threading.Lock()
-        self.telemetry = Telemetry(self.connection, "drone1", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -235,95 +235,249 @@ class Drone:
        new_lat = lat + (d_north / 111320)
        new_lon = lon + (d_east / (111320 * math.cos(math.radians(lat))))
        return new_lat, new_lon
-   def dynamic_landing_approach(start_mission, shared_lat, shared_lon, altitude, spacing=10.0):
-    # Broadcast arrival immediately
-      arrival_msg = {
-        "type": "ARRIVED",
-        "drone_id": start_mission.telemetry.drone_id,
-        "timestamp": time.time()
-    }
-      start_mission.telemetry.sock.sendto(
-        json.dumps(arrival_msg).encode(),
-        (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
-    )
-      print("Broadcasted arrival. Computing landing slot dynamically...")
 
-      last_total = 0
-      stable_cycles = 0
-      REQUIRED_STABLE_CYCLES = 3   # how many consecutive checks total must hold before committing
+    def dynamic_landing_approach(
+           self,
+           shared_lat,
+           shared_lon,
+           altitude,
+           spacing=10.0,
+           total_drones=3
+   ):
+       arrival_msg = {
+           "type": "ARRIVED",
+           "drone_id": self.telemetry.drone_id,
+           "timestamp": time.time()
+       }
 
-      while True:
-          with start_mission.arrived_lock:
-              nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
+       self.telemetry.sock.sendto(
+           json.dumps(arrival_msg).encode(),
+           (
+               self.telemetry.broadcast_ip,
+               self.telemetry.port
+           )
+       )
 
-          total = len(nearby_ids)
-          my_index = nearby_ids.index(start_mission.telemetry.drone_id)
+       print(
+           "Broadcasted arrival. "
+           "Computing landing slot dynamically..."
+       )
 
-          if total != last_total:
-              print(f"[SLOT UPDATE] {total} drone(s) arrived so far: {nearby_ids}")
-              last_total = total
-              stable_cycles = 0
-          else:
-              stable_cycles += 1
+       last_total = 0
+       stable_cycles = 0
+       REQUIRED_STABLE_CYCLES = 3
 
-          d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=spacing)
-          slot_lat, slot_lon = start_mission.offset_latlon(shared_lat, shared_lon, d_north, d_east)
+       while True:
+           # Get list of drones that have arrived
+           with self.arrived_lock:
+               nearby_ids = sorted(
+                   set(
+                       [self.telemetry.drone_id]
+                       + list(self.arrived_drones.keys())
+                   )
+               )
 
-        # Move toward the currently-computed slot (one step, not a blocking full wait)
-          cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
-          cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
+           total = len(nearby_ids)
 
-          if start_mission.check_separation(cur_lat, cur_lon, slot_lat, slot_lon):
-              start_mission.goto_position(slot_lat, slot_lon, altitude)
- 
-          dist_to_slot = start_mission.calc_distance(cur_lat, cur_lon, slot_lat, slot_lon)
-          print(f"[SLOT {my_index}/{total}] dist_to_slot={dist_to_slot:.1f}m")
+           # Find my position/index in the sorted drone list
+           my_index = nearby_ids.index(
+               self.telemetry.drone_id
+           )
 
-        # Commit once: we know the full expected swarm has checked in, count has been
-        # stable for a few cycles, AND we've physically reached our current slot
-          if total >= TOTAL_DRONES and stable_cycles >= REQUIRED_STABLE_CYCLES and dist_to_slot < 1.5:
-              print(f"Committed to slot {my_index}/{total}. Proceeding to land.")
-              return slot_lat, slot_lon
+           # Check whether number of arrived drones changed
+           if total != last_total:
+               print(
+                   f"[SLOT UPDATE] "
+                   f"{total} drone(s) arrived: {nearby_ids}"
+               )
 
-          time.sleep(0.5)
+               last_total = total
+               stable_cycles = 0
+           else:
+               stable_cycles += 1
+
+           # Calculate landing slot
+           d_north, d_east = self.compute_landing_offset(
+               my_index,
+               total,
+               spacing=spacing
+           )
+
+           slot_lat, slot_lon = self.offset_latlon(
+               shared_lat,
+               shared_lon,
+               d_north,
+               d_east
+           )
+
+           # Current position
+           cur_lat = self.telemetry.telemetry_data[
+               "position"
+           ]["lat"]
+
+           cur_lon = self.telemetry.telemetry_data[
+               "position"
+           ]["lon"]
+
+           if cur_lat is None or cur_lon is None:
+               print("Waiting for valid GPS position...")
+               time.sleep(0.5)
+               continue
+
+           # Move toward assigned landing slot
+           if self.check_separation(
+                   cur_lat,
+                   cur_lon,
+                   slot_lat,
+                   slot_lon
+           ):
+               self.goto_position(
+                   slot_lat,
+                   slot_lon,
+                   altitude
+               )
+
+           # Distance to landing slot
+           dist_to_slot = self.calc_distance(
+               cur_lat,
+               cur_lon,
+               slot_lat,
+               slot_lon
+           )
+
+           print(
+               f"[SLOT {my_index}/{total}] "
+               f"slot=({slot_lat:.7f}, {slot_lon:.7f}) | "
+               f"dist_to_slot={dist_to_slot:.1f}m"
+           )
+
+           # All drones arrived + slot stable + physically reached slot
+           if (
+                   total >= total_drones
+                   and stable_cycles >= REQUIRED_STABLE_CYCLES
+                   and dist_to_slot < 1.5
+           ):
+               print(
+                   f"Committed to slot "
+                   f"{my_index}/{total}. "
+                   f"Proceeding to land."
+               )
+
+               return slot_lat, slot_lon
+
+           time.sleep(0.5)
+
+
 def start():
     start_mission = Drone()
+
+    # -------------------------
+    # Wait until vehicle ready
+    # -------------------------
     while True:
         ready, reason = start_mission.is_ready_to_arm()
+
         print(reason)
+
         if ready:
             break
+
         time.sleep(1)
 
+    # -------------------------
+    # Set GUIDED mode
+    # -------------------------
     start_mission.set_mode("GUIDED")
     start_mission.wait_for_mode()
 
+    # -------------------------
+    # Arm
+    # -------------------------
     while True:
         start_mission.arm_drone()
+
         if start_mission.master.motors_armed():
             print("Armed")
             break
+
         print("Waiting for vehicle to become armable...")
         time.sleep(5)
 
     print("Motors armed")
+
+    # -------------------------
+    # Takeoff
+    # -------------------------
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
 
-    SHARED_LAT, SHARED_LON = 28.315913, 77.359462
-    start_mission.wait_for_goto_position(SHARED_LAT, SHARED_LON, 20)
+    # -------------------------
+    # Shared location
+    # -------------------------
+    SHARED_LAT = 28.315913
+    SHARED_LON = 77.359462
 
-    slot_lat, slot_lon = dynamic_landing_approach(start_mission, SHARED_LAT, SHARED_LON, 20, spacing=10.0)
+    start_mission.wait_for_goto_position(
+        SHARED_LAT,
+        SHARED_LON,
+        20
+    )
 
-# Stagger actual descent slightly by index for extra margin
-   with start_mission.arrived_lock:
-       nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
-   my_index = nearby_ids.index(start_mission.telemetry.drone_id)
-   time.sleep(my_index * 3)
+    # -------------------------
+    # Dynamic landing approach
+    # -------------------------
+    slot_lat, slot_lon = start_mission.dynamic_landing_approach(
+        SHARED_LAT,
+        SHARED_LON,
+        20,
+        spacing=10.0,
+        total_drones=3
+    )
 
-   start_mission.set_mode("LAND")
-   time.sleep(100)
-    # Fly toward the shared area (not landing here -- just converging)
-       # Fly toward the shared area (not landing here -- just converging)
+    # -------------------------
+    # Get final drone index
+    # -------------------------
+    with start_mission.arrived_lock:
+        nearby_ids = sorted(
+            set(
+                [start_mission.telemetry.drone_id]
+                + list(start_mission.arrived_drones.keys())
+            )
+        )
+
+    my_index = nearby_ids.index(
+        start_mission.telemetry.drone_id
+    )
+
+    print(
+        f"Final landing slot index: "
+        f"{my_index} / {len(nearby_ids)}"
+    )
+
+    # -------------------------
+    # Stagger landing
+    # -------------------------
+    landing_delay = my_index * 3
+
+    print(
+        f"Waiting {landing_delay} seconds "
+        f"before LAND..."
+    )
+
+    time.sleep(landing_delay)
+
+    # -------------------------
+    # LAND
+    # -------------------------
+    start_mission.set_mode("LAND")
+
+    print(
+        f"LAND command sent for "
+        f"{start_mission.telemetry.drone_id}"
+    )
+
+    time.sleep(100)
+
+
 if __name__ == '__main__':
     start()
