@@ -10,6 +10,7 @@ from drone.mavlink_manager import Connection
 class Drone:
     CRITICAL_DISTANCE = 5.0
     SLOWDOWN_ZONE = 10.0
+    TOTAL_DRONES = 3
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -234,6 +235,57 @@ class Drone:
        new_lat = lat + (d_north / 111320)
        new_lon = lon + (d_east / (111320 * math.cos(math.radians(lat))))
        return new_lat, new_lon
+   def dynamic_landing_approach(start_mission, shared_lat, shared_lon, altitude, spacing=10.0):
+    # Broadcast arrival immediately
+      arrival_msg = {
+        "type": "ARRIVED",
+        "drone_id": start_mission.telemetry.drone_id,
+        "timestamp": time.time()
+    }
+      start_mission.telemetry.sock.sendto(
+        json.dumps(arrival_msg).encode(),
+        (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
+    )
+      print("Broadcasted arrival. Computing landing slot dynamically...")
+
+      last_total = 0
+      stable_cycles = 0
+      REQUIRED_STABLE_CYCLES = 3   # how many consecutive checks total must hold before committing
+
+      while True:
+          with start_mission.arrived_lock:
+              nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
+
+          total = len(nearby_ids)
+          my_index = nearby_ids.index(start_mission.telemetry.drone_id)
+
+          if total != last_total:
+              print(f"[SLOT UPDATE] {total} drone(s) arrived so far: {nearby_ids}")
+              last_total = total
+              stable_cycles = 0
+          else:
+              stable_cycles += 1
+
+          d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=spacing)
+          slot_lat, slot_lon = start_mission.offset_latlon(shared_lat, shared_lon, d_north, d_east)
+
+        # Move toward the currently-computed slot (one step, not a blocking full wait)
+          cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
+          cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
+
+          if start_mission.check_separation(cur_lat, cur_lon, slot_lat, slot_lon):
+              start_mission.goto_position(slot_lat, slot_lon, altitude)
+ 
+          dist_to_slot = start_mission.calc_distance(cur_lat, cur_lon, slot_lat, slot_lon)
+          print(f"[SLOT {my_index}/{total}] dist_to_slot={dist_to_slot:.1f}m")
+
+        # Commit once: we know the full expected swarm has checked in, count has been
+        # stable for a few cycles, AND we've physically reached our current slot
+          if total >= TOTAL_DRONES and stable_cycles >= REQUIRED_STABLE_CYCLES and dist_to_slot < 1.5:
+              print(f"Committed to slot {my_index}/{total}. Proceeding to land.")
+              return slot_lat, slot_lon
+
+          time.sleep(0.5)
 def start():
     start_mission = Drone()
     while True:
@@ -259,58 +311,19 @@ def start():
     start_mission.wait_for_altitude(20)
 
     SHARED_LAT, SHARED_LON = 28.315913, 77.359462
-
-    # Fly toward the shared area (not landing here -- just converging)
     start_mission.wait_for_goto_position(SHARED_LAT, SHARED_LON, 20)
 
-    # --- Broadcast arrival and wait for others to check in ---
-    print("Reached shared target. Broadcasting arrival.")
-    arrival_msg = {
-        "type": "ARRIVED",
-        "drone_id": start_mission.telemetry.drone_id,
-        "timestamp": time.time()
-    }
-    start_mission.telemetry.sock.sendto(
-        json.dumps(arrival_msg).encode(),
-        (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
-    )
+    slot_lat, slot_lon = dynamic_landing_approach(start_mission, SHARED_LAT, SHARED_LON, 20, spacing=10.0)
 
-    ARRIVAL_GATHER_WINDOW = 6
-    print(f"Waiting {ARRIVAL_GATHER_WINDOW}s for other drones to check in...")
-    time.sleep(ARRIVAL_GATHER_WINDOW)
+# Stagger actual descent slightly by index for extra margin
+   with start_mission.arrived_lock:
+       nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
+   my_index = nearby_ids.index(start_mission.telemetry.drone_id)
+   time.sleep(my_index * 3)
 
-    # --- Compute slot from the STABLE arrived_drones snapshot, not live telemetry ---
-    with start_mission.arrived_lock:
-        nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
-
-    my_index = nearby_ids.index(start_mission.telemetry.drone_id)
-    total = len(nearby_ids)
-    print(f"Drones confirmed arrived: {nearby_ids}")
-
-    d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=8.0)
-    slot_lat, slot_lon = start_mission.offset_latlon(SHARED_LAT, SHARED_LON, d_north, d_east)
-
-    print(f"Flying to individual slot {my_index}/{total}: offset north={d_north:.1f} east={d_east:.1f}")
-    start_mission.wait_for_goto_position(slot_lat, slot_lon, 20)
-
-    # --- Final separation check before committing to LAND ---
-    cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
-    cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
-    max_wait = 10
-    waited = 0
-    while not start_mission.check_separation(cur_lat, cur_lon, slot_lat, slot_lon) and waited < max_wait:
-        print("Not safe to land yet, holding...")
-        time.sleep(1)
-        waited += 1
-        cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
-        cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
-
-    # --- Stagger actual landing by slot index for extra safety margin ---
-    stagger_delay = my_index * 3
-    print(f"Staggering landing by {stagger_delay}s (slot {my_index})")
-    time.sleep(stagger_delay)
-
-    start_mission.set_mode("LAND")
-    time.sleep(100)    # Fly toward the shared area (not landing here -- just converging)
+   start_mission.set_mode("LAND")
+   time.sleep(100)
+    # Fly toward the shared area (not landing here -- just converging)
+       # Fly toward the shared area (not landing here -- just converging)
 if __name__ == '__main__':
     start()
