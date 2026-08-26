@@ -16,7 +16,7 @@ class Drone:
         self.other_drones = {}
         self.other_lock = threading.Lock()
 
-        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone1", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
