@@ -8,8 +8,8 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
-    CRITICAL_DISTANCE = 2.0
-    SLOWDOWN_ZONE = 5.0
+    CRITICAL_DISTANCE = 5.0
+    SLOWDOWN_ZONE = 10.0
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -238,50 +238,48 @@ def start():
     start_mission = Drone()
     while True:
         ready, reason = start_mission.is_ready_to_arm()
-
         print(reason)
-
         if ready:
             break
-
         time.sleep(1)
 
-    # Now prepare the vehicle
     start_mission.set_mode("GUIDED")
     start_mission.wait_for_mode()
 
     while True:
-
         start_mission.arm_drone()
-
         if start_mission.master.motors_armed():
             print("Armed")
             break
-
         print("Waiting for vehicle to become armable...")
         time.sleep(5)
+
     print("Motors armed")
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
+
     SHARED_LAT, SHARED_LON = 28.315913, 77.359462
-    
+
     # Fly toward the shared area (not landing here -- just converging)
     start_mission.wait_for_goto_position(SHARED_LAT, SHARED_LON, 20)
+
+    # --- Broadcast arrival and wait for others to check in ---
     print("Reached shared target. Broadcasting arrival.")
     arrival_msg = {
-    "type": "ARRIVED",
-    "drone_id": start_mission.telemetry.drone_id,
-    "timestamp": time.time()
+        "type": "ARRIVED",
+        "drone_id": start_mission.telemetry.drone_id,
+        "timestamp": time.time()
     }
     start_mission.telemetry.sock.sendto(
-    json.dumps(arrival_msg).encode(),
-    (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
+        json.dumps(arrival_msg).encode(),
+        (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
     )
+
     ARRIVAL_GATHER_WINDOW = 6
     print(f"Waiting {ARRIVAL_GATHER_WINDOW}s for other drones to check in...")
     time.sleep(ARRIVAL_GATHER_WINDOW)
 
-# Use the ARRIVED snapshot, not live position data
+    # --- Compute slot from the STABLE arrived_drones snapshot, not live telemetry ---
     with start_mission.arrived_lock:
         nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
 
@@ -289,11 +287,30 @@ def start():
     total = len(nearby_ids)
     print(f"Drones confirmed arrived: {nearby_ids}")
 
-    d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=5.0)
+    d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=8.0)
     slot_lat, slot_lon = start_mission.offset_latlon(SHARED_LAT, SHARED_LON, d_north, d_east)
 
     print(f"Flying to individual slot {my_index}/{total}: offset north={d_north:.1f} east={d_east:.1f}")
     start_mission.wait_for_goto_position(slot_lat, slot_lon, 20)
 
+    # --- Final separation check before committing to LAND ---
+    cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
+    cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
+    max_wait = 10
+    waited = 0
+    while not start_mission.check_separation(cur_lat, cur_lon, slot_lat, slot_lon) and waited < max_wait:
+        print("Not safe to land yet, holding...")
+        time.sleep(1)
+        waited += 1
+        cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
+        cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
+
+    # --- Stagger actual landing by slot index for extra safety margin ---
+    stagger_delay = my_index * 3
+    print(f"Staggering landing by {stagger_delay}s (slot {my_index})")
+    time.sleep(stagger_delay)
+
+    start_mission.set_mode("LAND")
+    time.sleep(100)    # Fly toward the shared area (not landing here -- just converging)
 if __name__ == '__main__':
     start()
