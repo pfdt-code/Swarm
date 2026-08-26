@@ -17,7 +17,7 @@ class Drone:
         self.other_lock = threading.Lock()
         self.arrived_drones = {}
         self.arrived_lock = threading.Lock()
-        self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone1", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -277,23 +277,23 @@ def start():
     json.dumps(arrival_msg).encode(),
     (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
     )
-
-    ARRIVAL_GATHER_WINDOW = 6  # seconds -- give slower drones time to also arrive & broadcast
+    ARRIVAL_GATHER_WINDOW = 6
     print(f"Waiting {ARRIVAL_GATHER_WINDOW}s for other drones to check in...")
     time.sleep(ARRIVAL_GATHER_WINDOW)
-    # Now figure out final individual slot based on how many drones are here
-    with start_mission.other_lock:
-        nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.other_drones.keys())))
+
+# Use the ARRIVED snapshot, not live position data
+    with start_mission.arrived_lock:
+        nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
+
     my_index = nearby_ids.index(start_mission.telemetry.drone_id)
     total = len(nearby_ids)
+    print(f"Drones confirmed arrived: {nearby_ids}")
 
     d_north, d_east = start_mission.compute_landing_offset(my_index, total, spacing=5.0)
     slot_lat, slot_lon = start_mission.offset_latlon(SHARED_LAT, SHARED_LON, d_north, d_east)
 
     print(f"Flying to individual slot {my_index}/{total}: offset north={d_north:.1f} east={d_east:.1f}")
-    start_mission.wait_for_goto_position(slot_lat, slot_lon, 20)   # separated by ~3m minimum, not 0m
+    start_mission.wait_for_goto_position(slot_lat, slot_lon, 20)
 
-    start_mission.set_mode("LAND")
-    time.sleep(100)
 if __name__ == '__main__':
     start()
