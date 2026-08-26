@@ -1,5 +1,5 @@
 import threading
-
+import json
 import logging
 from pymavlink import mavutil
 import math
@@ -15,8 +15,9 @@ class Drone:
         self.master = self.connection.master
         self.other_drones = {}
         self.other_lock = threading.Lock()
-
-        self.telemetry = Telemetry(self.connection, "drone1", "192.168.199.255", 5005, '0.0.0.0')
+        self.arrived_drones = {}
+        self.arrived_lock = threading.Lock()
+        self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -161,16 +162,32 @@ class Drone:
         print("Timeout waiting for altitude")
         return False
     def handle_peer_message(self, msg, addr):
-        pos = msg.get("position",{})
+        if msg.get("type") == "ARRIVED":
+            with self.arrived_lock:
+                self.arrived_drones[msg["drone_id"]] = msg["timestamp"]
+            return
+
+        pos = msg.get("position", {})
         if pos.get("lat") is None or pos.get("lon") is None:
-          return
+            return
         with self.other_lock:
-            self.other_drones[msg["drone_id"]] = {
-                "lat": msg["position"]["lat"],
-                "lon": msg["position"]["lon"],
-                "alt": msg["position"]["alt"],
-                "timestamp": msg["timestamp"],
-            }
+       	    self.other_drones[msg["drone_id"]] = {
+            "lat": msg["position"]["lat"],
+            "lon": msg["position"]["lon"],
+            "alt": msg["position"]["alt"],
+            "timestamp": msg["timestamp"],
+        }
+   # def handle_peer_message(self, msg, addr):
+       # pos = msg.get("position",{})
+      #  if pos.get("lat") is None or pos.get("lon") is None:
+        #  return
+       # with self.other_lock:
+           # self.other_drones[msg["drone_id"]] = {
+            #    "lat": msg["position"]["lat"],
+           #     "lon": msg["position"]["lon"],
+          #      "alt": msg["position"]["alt"],
+         #       "timestamp": msg["timestamp"],
+        #    }
     def get_nearby_drones(self, max_age=2.0):
         with self.other_lock:
             now = time.time()
@@ -247,10 +264,23 @@ def start():
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
     SHARED_LAT, SHARED_LON = 28.315913, 77.359462
-
+    
     # Fly toward the shared area (not landing here -- just converging)
     start_mission.wait_for_goto_position(SHARED_LAT, SHARED_LON, 20)
+    print("Reached shared target. Broadcasting arrival.")
+    arrival_msg = {
+    "type": "ARRIVED",
+    "drone_id": start_mission.telemetry.drone_id,
+    "timestamp": time.time()
+    }
+    start_mission.telemetry.sock.sendto(
+    json.dumps(arrival_msg).encode(),
+    (start_mission.telemetry.broadcast_ip, start_mission.telemetry.port)
+    )
 
+    ARRIVAL_GATHER_WINDOW = 6  # seconds -- give slower drones time to also arrive & broadcast
+    print(f"Waiting {ARRIVAL_GATHER_WINDOW}s for other drones to check in...")
+    time.sleep(ARRIVAL_GATHER_WINDOW)
     # Now figure out final individual slot based on how many drones are here
     with start_mission.other_lock:
         nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.other_drones.keys())))
