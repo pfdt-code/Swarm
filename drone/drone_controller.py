@@ -8,9 +8,11 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
-    CRITICAL_DISTANCE = 5.0
+    CRITICAL_DISTANCE = 8.0
     SLOWDOWN_ZONE = 10.0
     TOTAL_DRONES = 3
+    SLOW_SPEED = 1.5
+    NORMAL_SPEED = 5
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -18,7 +20,7 @@ class Drone:
         self.other_lock = threading.Lock()
         self.arrived_drones = {}
         self.arrived_lock = threading.Lock()
-        self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -32,7 +34,14 @@ class Drone:
            format='%(asctime)s [%(levelname)s] %(message)s',
            datefmt='%Y-%m-%d %H:%M:%S'
             )
-
+    def set_speed(self, speed):
+        self.master.mav.param_set_send(
+        self.master.target_system,
+        self.master.target_component,
+        b"WPNAV_SPEED",
+        float(speed * 100),
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+    )
     def is_ready_to_arm(self):
 
         gps = self.telemetry.telemetry_data["gps"]
@@ -208,6 +217,9 @@ class Drone:
             if dist < Drone.SLOWDOWN_ZONE:
                 logging.info(f"SLOWDOWN_ZONE | near={drone_id} | dist={dist:.2f}m | "
                 f"my_pos=({my_lat:.7f},{my_lon:.7f})")
+                self.set_speed(Drone.SLOW_SPEED)
+            else:
+                self.set_speed(Drone.NORMAL_SPEED)
             if dist < Drone.CRITICAL_DISTANCE:
                 peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], target_lat, target_lon)
                 am_farther = ((my_dist_to_target > peer_dist_to_target) or
@@ -365,119 +377,96 @@ class Drone:
 
                return slot_lat, slot_lon
 
-           time.sleep(0.5)
+               time.sleep(0.5)
+    def decide_landing_slot(self, shared_lat, shared_lon, altitude, spacing=10.0, total_drones=3, listen_window=4.0):
+        """Call this right after reaching target altitude, before flying anywhere."""
 
+        # Broadcast presence so others know I'm here too
+        presence_msg = {
+            "type": "ARRIVED",
+            "drone_id": self.telemetry.drone_id,
+            "timestamp": time.time()
+        }
+        self.telemetry.sock.sendto(
+            json.dumps(presence_msg).encode(),
+            (self.telemetry.broadcast_ip, self.telemetry.port)
+        )
 
+        print(f"At altitude. Listening {listen_window}s to identify swarm members...")
+        time.sleep(listen_window)
+
+        with self.arrived_lock:
+            known_ids = sorted(set([self.telemetry.drone_id] + list(self.arrived_drones.keys())))
+
+        total = len(known_ids)
+        my_index = known_ids.index(self.telemetry.drone_id)
+        print(f"[SLOT DECIDED] Swarm: {known_ids} -- I am index {my_index}/{total}")
+
+        if total < total_drones:
+            print(f"[WARNING] Only {total}/{total_drones} drones detected -- proceeding anyway")
+
+        if my_index == 0:
+            # lowest-ID drone claims the exact shared point
+            target_lat, target_lon = shared_lat, shared_lon
+            print("I am index 0 -- targeting the exact shared point")
+        else:
+            offset_index = my_index - 1
+            offset_total = max(total - 1, 1)
+            d_north, d_east = self.compute_landing_offset(offset_index, offset_total, spacing=spacing)
+            target_lat, target_lon = self.offset_latlon(shared_lat, shared_lon, d_north, d_east)
+            print(f"I am index {my_index} -- targeting offset slot {offset_index}/{offset_total}")
+
+        return target_lat, target_lon
 def start():
     start_mission = Drone()
 
-    # -------------------------
-    # Wait until vehicle ready
-    # -------------------------
     while True:
         ready, reason = start_mission.is_ready_to_arm()
-
         print(reason)
-
         if ready:
             break
-
         time.sleep(1)
 
-    # -------------------------
-    # Set GUIDED mode
-    # -------------------------
     start_mission.set_mode("GUIDED")
     start_mission.wait_for_mode()
 
-    # -------------------------
-    # Arm
-    # -------------------------
     while True:
         start_mission.arm_drone()
-
         if start_mission.master.motors_armed():
             print("Armed")
             break
-
         print("Waiting for vehicle to become armable...")
         time.sleep(5)
 
     print("Motors armed")
 
-    # -------------------------
-    # Takeoff
-    # -------------------------
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
 
-    # -------------------------
-    # Shared location
-    # -------------------------
-    SHARED_LAT = 28.315913
-    SHARED_LON = 77.359462
+    SHARED_LAT = 28.313420
+    SHARED_LON = 77.357351
 
-    start_mission.wait_for_goto_position(
-        SHARED_LAT,
-        SHARED_LON,
-        20
+    # Decide the final slot ONCE, right after reaching altitude, before moving
+    target_lat, target_lon = start_mission.decide_landing_slot(
+        SHARED_LAT, SHARED_LON, 20, spacing=10.0, total_drones=3, listen_window=4.0
     )
 
-    # -------------------------
-    # Dynamic landing approach
-    # -------------------------
-    slot_lat, slot_lon = start_mission.dynamic_landing_approach(
-        SHARED_LAT,
-        SHARED_LON,
-        20,
-        spacing=10.0,
-        total_drones=3
-    )
+    # Fly DIRECTLY to that decided slot -- this is the only movement needed
+    start_mission.wait_for_goto_position(target_lat, target_lon, 20)
 
-    # -------------------------
-    # Get final drone index
-    # -------------------------
+    my_index = None
     with start_mission.arrived_lock:
-        nearby_ids = sorted(
-            set(
-                [start_mission.telemetry.drone_id]
-                + list(start_mission.arrived_drones.keys())
-            )
-        )
+        nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
+    my_index = nearby_ids.index(start_mission.telemetry.drone_id)
+    print(f"Final landing slot index: {my_index} / {len(nearby_ids)}")
 
-    my_index = nearby_ids.index(
-        start_mission.telemetry.drone_id
-    )
-
-    print(
-        f"Final landing slot index: "
-        f"{my_index} / {len(nearby_ids)}"
-    )
-
-    # -------------------------
-    # Stagger landing
-    # -------------------------
     landing_delay = my_index * 3
-
-    print(
-        f"Waiting {landing_delay} seconds "
-        f"before LAND..."
-    )
-
+    print(f"Waiting {landing_delay} seconds before LAND...")
     time.sleep(landing_delay)
 
-    # -------------------------
-    # LAND
-    # -------------------------
     start_mission.set_mode("LAND")
-
-    print(
-        f"LAND command sent for "
-        f"{start_mission.telemetry.drone_id}"
-    )
-
+    print(f"LAND command sent for {start_mission.telemetry.drone_id}")
     time.sleep(100)
-
 
 if __name__ == '__main__':
     start()
