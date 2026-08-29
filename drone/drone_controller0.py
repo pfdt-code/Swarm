@@ -12,12 +12,14 @@ class Drone:
     SLOWDOWN_ZONE = 10.0
     NORMAL_SPEED = 5.0
     SLOW_SPEED = 1.0
+
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
         self.other_drones = {}
         self.other_lock = threading.Lock()
         self.arrived_drones = {}
+        self.current_speed = None
         self.arrived_lock = threading.Lock()
         self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
@@ -82,6 +84,8 @@ class Drone:
         return True, "Ready to arm"
 
     def set_speed(self, speed_m_s):
+        if self.current_speed == speed_m_s:
+           return
 
         print(f"[SPEED] Changing speed to {speed_m_s} m/s")
 
@@ -232,32 +236,128 @@ class Drone:
                 if now - v["timestamp"] < max_age
             }
     def check_separation(self, my_lat, my_lon, target_lat, target_lon):
-        my_dist_to_target = self.calc_distance(my_lat, my_lon, target_lat, target_lon)
+
+        my_dist_to_target = self.calc_distance(
+            my_lat,
+            my_lon,
+            target_lat,
+            target_lon
+        )
+
+        should_slow = False
+        should_brake = False
+
         for drone_id, pos in self.get_nearby_drones().items():
+
             if pos["lat"] is None or pos["lon"] is None:
                 continue
+
+            # Distance between drones
             dlat = (my_lat - pos["lat"]) * 111320
-            dlon =  (my_lon - pos["lon"]) * 111320 * math.cos(math.radians(my_lat))
+
+            dlon = (
+                (my_lon - pos["lon"])
+                * 111320
+                * math.cos(math.radians(my_lat))
+            )
+
             dist = math.hypot(dlon, dlat)
-            print(f"[SEPARATION CHECK] distance to {drone_id}: {dist:.2f} m")
+
+            print(
+                f"[SEPARATION] {drone_id}: "
+                f"{dist:.2f} m"
+            )
+
+            # ------------------------------------------------
+            # SLOWDOWN ZONE
+            # ------------------------------------------------
+
             if dist < Drone.SLOWDOWN_ZONE:
-                logging.info(f"SLOWDOWN_ZONE | near={drone_id} | dist={dist:.2f}m | "
-                f"my_pos=({my_lat:.7f},{my_lon:.7f})")
-                self.set_speed(3)
-            else:
-                self.set_speed(10)
+
+                peer_dist_to_target = self.calc_distance(
+                    pos["lat"],
+                    pos["lon"],
+                    target_lat,
+                    target_lon
+                )
+
+                print(
+                    f"[PRIORITY] "
+                    f"Me={my_dist_to_target:.2f}m "
+                    f"| {drone_id}={peer_dist_to_target:.2f}m"
+                )
+
+                # I am farther from target
+                if my_dist_to_target > peer_dist_to_target:
+
+                    should_slow = True
+
+                    logging.info(
+                        f"SLOWDOWN | near={drone_id} | "
+                        f"distance={dist:.2f}m | "
+                        f"my_target_dist={my_dist_to_target:.2f}m | "
+                        f"peer_target_dist={peer_dist_to_target:.2f}m"
+                    )
+
+                else:
+
+                    print(
+                        f"[PRIORITY] {drone_id} is farther "
+                        f"from target. I keep normal speed."
+                    )
+
+            # ------------------------------------------------
+            # CRITICAL DISTANCE
+            # ------------------------------------------------
+
             if dist < Drone.CRITICAL_DISTANCE:
-                peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], target_lat, target_lon)
-                am_farther = ((my_dist_to_target > peer_dist_to_target) or
-                              (my_dist_to_target == peer_dist_to_target and self.telemetry.drone_id > drone_id))
-                if not am_farther:
-                    print(f"[PRIORITY] {drone_id} | dist={dist:.2f} m, but I'm closer to target -- holding course")
-                    continue
-                print(f"[Emergency]{drone_id} is {dist:.2f} m away")
-                logging.warning(f"BREAK | near={drone_id} | dist={dist:.2f}m | "
-                                f"my_pos={my_lat:.7f}, {my_lon:.7f} | peer_pos({pos['lat']:.7f},{pos['lon']:.7f})")
-                self.set_mode("BRAKE")
-                return False
+
+                peer_dist_to_target = self.calc_distance(
+                    pos["lat"],
+                    pos["lon"],
+                    target_lat,
+                    target_lon
+                )
+
+                # I am farther from target
+                if my_dist_to_target > peer_dist_to_target:
+
+                    should_brake = True
+
+                    logging.warning(
+                        f"BRAKE | near={drone_id} | "
+                        f"dist={dist:.2f}m | "
+                        f"my_target={my_dist_to_target:.2f}m | "
+                        f"peer_target={peer_dist_to_target:.2f}m"
+                    )
+
+                else:
+
+                    print(
+                        f"[PRIORITY] {drone_id} is farther "
+                        f"from target. I have priority."
+                    )
+
+        # ------------------------------------------------
+        # APPLY SPEED ONLY ONCE
+        # ------------------------------------------------
+
+        if should_brake:
+
+            print("[BRAKE] I am the lower-priority drone")
+            self.set_mode("BRAKE")
+            return False
+
+        elif should_slow:
+
+            print("[SPEED] Lower priority → 3 m/s")
+            self.set_speed(3)
+
+        else:
+
+            print("[SPEED] Normal → 10 m/s")
+            self.set_speed(10)
+
         return True
     def compute_landing_offset(self, index, total, spacing=3.0):
        """Evenly place drones on a small circle around the shared target."""
@@ -303,8 +403,7 @@ def start():
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
 
-    SHARED_LAT, SHARED_LON = 28.315913, 77.359462
-
+    SHARED_LAT, SHARED_LON = 28.316183, 77.354367
     target_lat, target_lon = start_mission.decide_landing_slot(
         SHARED_LAT, SHARED_LON, 20, spacing=10.0, total_drones=3, listen_window=4.0
     )
