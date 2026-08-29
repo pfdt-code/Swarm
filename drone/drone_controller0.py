@@ -8,8 +8,10 @@ from drone.drone_telemetry import Telemetry
 # from drone.helper import telemetry
 from drone.mavlink_manager import Connection
 class Drone:
-    CRITICAL_DISTANCE = 10.0
-    SLOWDOWN_ZONE = 15.0
+    CRITICAL_DISTANCE = 5.0
+    SLOWDOWN_ZONE = 10.0
+    NORMAL_SPEED = 5.0
+    SLOW_SPEED = 1.0
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -79,7 +81,22 @@ class Drone:
 
         return True, "Ready to arm"
 
+    def set_speed(self, speed_m_s):
 
+        print(f"[SPEED] Changing speed to {speed_m_s} m/s")
+
+        self.master.mav.command_long_send(
+            self.master.target_system,
+            self.master.target_component,
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+            0,
+            1,
+            speed_m_s,
+            -1,
+            0, 0, 0, 0
+        )
+
+        self.current_speed = speed_m_s
     def arm_drone(self):
         self.master.mav.command_long_send(
             self.master.target_system,
@@ -226,6 +243,9 @@ class Drone:
             if dist < Drone.SLOWDOWN_ZONE:
                 logging.info(f"SLOWDOWN_ZONE | near={drone_id} | dist={dist:.2f}m | "
                 f"my_pos=({my_lat:.7f},{my_lon:.7f})")
+                self.set_speed(3)
+            else:
+                self.set_speed(10)
             if dist < Drone.CRITICAL_DISTANCE:
                 peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], target_lat, target_lon)
                 am_farther = ((my_dist_to_target > peer_dist_to_target) or
