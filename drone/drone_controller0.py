@@ -12,7 +12,9 @@ class Drone:
     SLOWDOWN_ZONE = 10.0
     NORMAL_SPEED = 5.0
     SLOW_SPEED = 1.0
-
+    CATCT_UP_SPEED = 12.0
+    FORMATION_GAP_MAX = 15.0
+    KNOWN_SWARM_IDS = ["drone1", "drone2", "drone3"]
     def __init__(self):
         self.connection = Connection("udp:0.0.0.0:14550")
         self.master = self.connection.master
@@ -21,7 +23,7 @@ class Drone:
         self.arrived_drones = {}
         self.current_speed = None
         self.arrived_lock = threading.Lock()
-        self.telemetry = Telemetry(self.connection, "drone3", "192.168.199.255", 5005, '0.0.0.0')
+        self.telemetry = Telemetry(self.connection, "drone2", "192.168.199.255", 5005, '0.0.0.0')
         self.telemetry.start(on_peer_message=self.handle_peer_message)
         self.lat = None
         self.lon = None
@@ -35,36 +37,22 @@ class Drone:
            format='%(asctime)s [%(levelname)s] %(message)s',
            datefmt='%Y-%m-%d %H:%M:%S'
             )
-    def decide_landing_slot(self, shared_lat, shared_lon, altitude, spacing=10.0, total_drones=3, listen_window=4.0):
-        presence_msg = {
-            "type": "ARRIVED",
-            "drone_id": self.telemetry.drone_id,
-            "timestamp": time.time()
-        }
-        self.telemetry.sock.sendto(
-            json.dumps(presence_msg).encode(),
-            (self.telemetry.broadcast_ip, self.telemetry.port)
-        )
-        print(f"At altitude. Listening {listen_window}s to identify swarm members...")
-        time.sleep(listen_window)
-
-        with self.arrived_lock:
-            known_ids = sorted(set([self.telemetry.drone_id] + list(self.arrived_drones.keys())))
-
+    def decide_landing_slot(self, shared_lat, shared_lon, altitude, spacing=10.0, heading_deg=None):
+        known_ids = Drone.KNOWN_SWARM_IDS
         total = len(known_ids)
         my_index = known_ids.index(self.telemetry.drone_id)
-        print(f"[SLOT DECIDED] Swarm: {known_ids} -- I am index {my_index}/{total}")
 
-        if my_index == 0:
-            target_lat, target_lon = shared_lat, shared_lon
-            print("I am index 0 -- targeting the exact shared point")
-        else:
-            offset_index = my_index - 1
-            offset_total = max(total - 1, 1)
-            d_north, d_east = self.compute_landing_offset(offset_index, offset_total, spacing=spacing)
-            target_lat, target_lon = self.offset_latlon(shared_lat, shared_lon, d_north, d_east)
-            print(f"I am index {my_index} -- targeting offset slot {offset_index}/{offset_total}")
+        if heading_deg is None:
+            cur_lat = self.telemetry.telemetry_data["position"]["lat"]
+            cur_lon = self.telemetry.telemetry_data["position"]["lon"]
+            heading_deg = self.compute_perpendicular_heading(cur_lat, cur_lon, shared_lat, shared_lon)
+            print(f"[AUTO HEADING] Computed perpendicular line heading: {heading_deg:.1f}°")
 
+        print(f"[SLOT DECIDED] Fixed roster: {known_ids} -- I am index {my_index}/{total} (line formation)")
+        d_north, d_east = self.compute_line_offset(my_index, total, spacing=spacing, heading_deg=heading_deg)
+        target_lat, target_lon = self.offset_latlon(shared_lat, shared_lon, d_north, d_east)
+
+        print(f"Line position {my_index}/{total}: offset north={d_north:.1f} east={d_east:.1f}")
         return target_lat, target_lon
     def is_ready_to_arm(self):
 
@@ -246,7 +234,7 @@ class Drone:
 
         should_slow = False
         should_brake = False
-
+        should_fast =  False
         for drone_id, pos in self.get_nearby_drones().items():
 
             if pos["lat"] is None or pos["lon"] is None:
@@ -267,11 +255,16 @@ class Drone:
                 f"[SEPARATION] {drone_id}: "
                 f"{dist:.2f} m"
             )
-
+            if dist > Drone.FORMATION_GAP_MAX:
+                peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], target_lat, target_lon)
+                if my_dist_to_target > peer_dist_to_target:
+	            # I am farther from target AND far from this neighbor -- I need to catch up
+                    should_fast = True
+                    print(f"[CATCH UP] {drone_id} is {dist:.1f}m away and I'm farther from target -- speeding up")
+           
             # ------------------------------------------------
             # SLOWDOWN ZONE
             # ------------------------------------------------
-
             if dist < Drone.SLOWDOWN_ZONE:
 
                 peer_dist_to_target = self.calc_distance(
@@ -352,23 +345,48 @@ class Drone:
 
             print("[SPEED] Lower priority → 3 m/s")
             self.set_speed(3)
-
+        elif should_fast:
+             self.set_speed(12)
+             print("SPEED CHANGED TO 12 m/s")
         else:
 
             print("[SPEED] Normal → 10 m/s")
-            self.set_speed(10)
+            self.set_speed(5)
 
         return True
-    def compute_landing_offset(self, index, total, spacing=3.0):
-       """Evenly place drones on a small circle around the shared target."""
-       if total <= 1:
-          return 0.0, 0.0
-       radius = spacing / (2 * math.sin(math.pi / total))
-       angle = 2 * math.pi * index / total
-       d_north = radius * math.cos(angle)
-       d_east = radius * math.sin(angle)
-       return d_north, d_east
+#    def compute_landing_offset(self, index, total, spacing=3.0):
+ #      """Evenly place drones on a small circle around the shared target."""
+  #     if total <= 1:
+   #       return 0.0, 0.0
+    #   radius = spacing / (2 * math.sin(math.pi / total))
+     #  angle = 2 * math.pi * index / total
+      # d_north = radius * math.cos(angle)
+      # d_east = radius * math.sin(angle)
+      # return d_north, d_east
+    def compute_line_offset(self, index, total, spacing=10.0, heading_deg=0.0):
+        """
+        Places 'total' drones in a straight line, 'spacing' meters apart,
+        centered on the shared point. heading_deg controls the line's
+        orientation (0 = north-south line, 90 = east-west line, etc.)
+        """
+        # Center the formation: index positions run symmetrically around 0
+        center_offset = (total - 1) / 2.0
+        distance_along_line = (index - center_offset) * spacing
 
+        heading_rad = math.radians(heading_deg)
+        d_north = distance_along_line * math.cos(heading_rad)
+        d_east = distance_along_line * math.sin(heading_rad)
+
+        return d_north, d_east
+    def compute_perpendicular_heading(self, my_lat, my_lon, shared_lat, shared_lon):
+        """Returns a heading (degrees) perpendicular to the direction from
+           current position toward the shared point -- gives side-by-side formation
+           regardless of approach direction."""
+        dlat = (shared_lat - my_lat) * 111320
+        dlon = (shared_lon - my_lon) * 111320 * math.cos(math.radians(my_lat))
+        approach_heading = math.degrees(math.atan2(dlon, dlat))  # heading toward shared point
+        perpendicular_heading = (approach_heading + 90) % 360
+        return perpendicular_heading
     def offset_latlon(self, lat, lon, d_north, d_east):
        new_lat = lat + (d_north / 111320)
        new_lon = lon + (d_east / (111320 * math.cos(math.radians(lat))))
@@ -402,22 +420,28 @@ def start():
     print("Motors armed")
     start_mission.takeoff(20)
     start_mission.wait_for_altitude(20)
+    SHARED_LAT, SHARED_LON = 28.352761, 77.391749
 
-    SHARED_LAT, SHARED_LON = 28.316183, 77.354367
+    # Fixed-roster line formation -- no broadcast wait needed, no race condition
     target_lat, target_lon = start_mission.decide_landing_slot(
-        SHARED_LAT, SHARED_LON, 20, spacing=10.0, total_drones=3, listen_window=4.0
+        SHARED_LAT, SHARED_LON, 20, spacing=10.0, heading_deg=0.0
     )
 
     print(f"Flying directly to decided slot: ({target_lat:.7f}, {target_lon:.7f})")
     start_mission.wait_for_goto_position(target_lat, target_lon, 20)
 
-    with start_mission.arrived_lock:
-        nearby_ids = sorted(set([start_mission.telemetry.drone_id] + list(start_mission.arrived_drones.keys())))
-    my_index = nearby_ids.index(start_mission.telemetry.drone_id)
-
-    landing_delay = my_index * 3
-    print(f"Waiting {landing_delay}s before LAND...")
-    time.sleep(landing_delay)
+    # Final live safety check right before committing to land -- not a fixed wait,
+    # just confirms nobody is currently too close
+    cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
+    cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
+    max_wait = 10
+    waited = 0
+    while not start_mission.check_separation(cur_lat, cur_lon, target_lat, target_lon) and waited < max_wait:
+        print("Not safe to land yet, holding...")
+        time.sleep(1)
+        waited += 1
+        cur_lat = start_mission.telemetry.telemetry_data["position"]["lat"]
+        cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
 
     start_mission.set_mode("LAND")
     time.sleep(100)
