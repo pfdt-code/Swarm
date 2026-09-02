@@ -154,16 +154,17 @@ class Drone:
         a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
         return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    def wait_for_goto_position(self,target_lat, target_lon, altitude, timeout=1200):
+    def wait_for_goto_position(self,target_lat, target_lon, altitude, shared_lat, shared_lon,timeout=1200):
         start_time = time.time()
         was_braking = False
+
         while time.time() - start_time < timeout:
 
 
             cur_lat = self.telemetry.telemetry_data["position"]["lat"]
             cur_lon = self.telemetry.telemetry_data["position"]["lon"]
             cur_alt = self.telemetry.telemetry_data["position"]["alt"]
-            if not self.check_separation(cur_lat, cur_lon, target_lat, target_lon):
+            if not self.check_separation(cur_lat, cur_lon, target_lat, target_lon, shared_lat, shared_lon):
                 was_braking = True
                 time.sleep(0.5)
                 continue
@@ -223,13 +224,14 @@ class Drone:
                 k: v for k, v in self.other_drones.items()
                 if now - v["timestamp"] < max_age
             }
-    def check_separation(self, my_lat, my_lon, target_lat, target_lon):
+    def check_separation(self, my_lat, my_lon, target_lat, target_lon, shared_lat, shared_lon):
+
 
         my_dist_to_target = self.calc_distance(
             my_lat,
             my_lon,
-            target_lat,
-            target_lon
+            shared_lat,
+            shared_lon,
         )
 
         should_slow = False
@@ -255,12 +257,13 @@ class Drone:
                 f"[SEPARATION] {drone_id}: "
                 f"{dist:.2f} m"
             )
-            if dist > Drone.FORMATION_GAP_MAX:
-                peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], target_lat, target_lon)
-                if my_dist_to_target > peer_dist_to_target:
+            peer_dist_to_target = self.calc_distance(pos["lat"], pos["lon"], shared_lat, shared_lon)
+            i_am_behind = my_dist_to_target > peer_dist_to_target
+            if dist > Drone.FORMATION_GAP_MAX and i_am_behind:
+
 	            # I am farther from target AND far from this neighbor -- I need to catch up
-                    should_fast = True
-                    print(f"[CATCH UP] {drone_id} is {dist:.1f}m away and I'm farther from target -- speeding up")
+                should_fast = True
+                print(f"[CATCH UP] {drone_id} is {dist:.1f}m away and I'm farther from target -- speeding up")
            
             # ------------------------------------------------
             # SLOWDOWN ZONE
@@ -428,7 +431,7 @@ def start():
     )
 
     print(f"Flying directly to decided slot: ({target_lat:.7f}, {target_lon:.7f})")
-    start_mission.wait_for_goto_position(target_lat, target_lon, 20)
+    start_mission.wait_for_goto_position(target_lat, target_lon, 20, SHARED_LAT, SHARED_LON)
 
     # Final live safety check right before committing to land -- not a fixed wait,
     # just confirms nobody is currently too close
@@ -436,7 +439,7 @@ def start():
     cur_lon = start_mission.telemetry.telemetry_data["position"]["lon"]
     max_wait = 10
     waited = 0
-    while not start_mission.check_separation(cur_lat, cur_lon, target_lat, target_lon) and waited < max_wait:
+    while not start_mission.check_separation(cur_lat, cur_lon, target_lat, target_lon, SHARED_LAT, SHARED_LON) and waited < max_wait:
         print("Not safe to land yet, holding...")
         time.sleep(1)
         waited += 1
